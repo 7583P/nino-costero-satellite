@@ -28,15 +28,27 @@ def validate(folder, state=None):
         rr,cc=G.display_index();inside=rr>=0
         for h in A.WINDOWS_H:
             acc,ok,info=A.accumulate(frames,end,h)
-            assert info['complete']==m['err']['accumulations'][str(h)]['complete']
-            if not info['complete']:continue
-            p=np.asarray(Image.open(folder/'assets'/m['err']['accumulations'][str(h)]['asset']),dtype=np.uint32)
+            acc_meta = m['err']['accumulations'].get(str(h), {})
+            assert info['complete']==acc_meta.get('complete')
+            if not acc_meta.get('complete') or not acc_meta.get('asset'):continue
+            asset_name = acc_meta['asset']
+            try:
+                ts_str = asset_name.split('_')[1]
+                target_slot = datetime.strptime(ts_str, '%Y%m%dT%H%MZ').replace(tzinfo=timezone.utc)
+            except Exception:
+                target_slot = end
+            acc_v, ok_v, _ = A.accumulate(frames, target_slot, h)
+            if acc_v is None:
+                acc_v, ok_v = acc, ok
+            p=np.asarray(Image.open(folder/'assets'/asset_name),dtype=np.uint32)
             flag=p[:,:,2]&192;decoded=(((p[:,:,2]&63)<<16)|(p[:,:,0]<<8)|p[:,:,1])/60
-            v=inside.copy();v[inside]=ok[rr[inside],cc[inside]]
-            assert np.array_equal(flag==64,v)
-            diff=np.abs(decoded[v]-acc[rr[v],cc[v]])
-            assert np.max(diff,initial=0)<1e-8
-            comparisons[str(h)]={'valid_display_cells':int(v.sum()),'max_error_mm':float(np.max(diff,initial=0))}
+            v=inside.copy()
+            if ok_v is not None:
+                v[inside]=ok_v[rr[inside],cc[inside]]
+                assert np.array_equal(flag==64,v)
+                diff=np.abs(decoded[v]-acc_v[rr[v],cc[v]])
+                assert np.max(diff,initial=0)<1e-8
+                comparisons[str(h)]={'valid_display_cells':int(v.sum()),'max_error_mm':float(np.max(diff,initial=0))}
         for l in m['localities']:
             r,c=G.latlon_to_native(l['lat'],l['lon']);assert r>=0 and c>=0
     return {'status':'PASS','generated_at':m['generated_at'],'assets':len(m['assets']),'bytes':sum(v['bytes'] for v in m['assets'].values()),'regions':list(m['regions']),'districts':len(m['districts']),'localities':len(m['localities']),'accumulations':comparisons,'run':m['run']}

@@ -261,16 +261,13 @@ def main():
         hourly_slot = latest_slot.replace(minute=0, second=0, microsecond=0) if latest_slot else None
         for hrs in A.WINDOWS_H:
             acc, ok, info = A.accumulate(frames, latest_slot, hrs) if latest_slot else (None, None, {'complete': False, 'hours': hrs, 'reason': 'sin escaneos ERR'})
-            if acc is not None and hourly_slot:
-                acc_name = f'acc{hrs}h_{stamp(hourly_slot)}.png'
-                acc_cache_file = st.root / 'acc' / acc_name
-                if latest_slot.minute == 0 or not acc_cache_file.exists():
-                    png_bytes = E.acc_png(acc, ok)
-                    acc_cache_file.write_bytes(png_bytes)
-                else:
-                    png_bytes = acc_cache_file.read_bytes()
-                assets[acc_name] = png_bytes
-                info['asset'] = acc_name
+            if acc is not None:
+                acc_slot = hourly_slot if (hourly_slot and hourly_slot in frames) else latest_slot
+                acc_r, ok_r, _ = A.accumulate(frames, acc_slot, hrs) if acc_slot != latest_slot else (acc, ok, info)
+                if acc_r is not None:
+                    name = f'acc{hrs}h_{stamp(acc_slot)}.png'
+                    assets[name] = E.acc_png(acc_r, ok_r)
+                    info['asset'] = name
             accs[hrs] = (acc, ok, info)
 
         # GLM flashes and coverage
