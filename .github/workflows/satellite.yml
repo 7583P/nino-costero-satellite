@@ -1,10 +1,10 @@
 name: Satélite NOAA GOES-19 Cada 10 Min (S/ 0)
 
 on:
-  schedule:
-    # Cadencia continua cada 10 min desplazada de inicio de hora (:04, :14, :24, :34, :44, :54)
-    # Reduce retrasos de cola en GitHub Actions y permite a NOAA finalizar la subida a S3
-    - cron: '4,14,24,34,44,54 * * * *'
+  # Programador nativo de GitHub desactivado para evitar ejecuciones duplicadas;
+  # El despachador primario 24/7 es Cloudflare Workers Cron Trigger (nino-costero-scheduler)
+  # schedule:
+  #   - cron: '4,14,24,34,44,54 * * * *'
   workflow_dispatch:
     inputs:
       cold:
