@@ -1,0 +1,9 @@
+# Satellite pipeline dependencies (NOAA ERR + GOES-19 ABI/GLM).
+# Pinned wheels; no system compilers needed.
+h5py==3.16.0
+numpy==2.1.1
+pyproj==3.8.0
+pillow==11.2.1
+shapely==2.2.0
+psutil==7.2.2
+requests==2.32.3

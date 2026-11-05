@@ -1,0 +1,334 @@
+{
+ "metadata": {
+  "source": "OpenStreetMap Nominatim (© colaboradores de OpenStreetMap, ODbL)",
+  "validated_against": "polígonos distritales IGN (admin_costa_norte.json), tolerancia 0.01°",
+  "rejected": [
+   {
+    "name": "Veintiséis de Octubre",
+    "reason": "no OSM place inside expected district",
+    "candidates": []
+   }
+  ]
+ },
+ "localities": [
+  {
+   "id": "chiclayo",
+   "name": "Chiclayo",
+   "lat": -6.77161,
+   "lon": -79.83872,
+   "district_id": "lambayeque/chiclayo/chiclayo",
+   "district": "Chiclayo",
+   "province": "Chiclayo",
+   "region": "lambayeque",
+   "osm": "node/320100077"
+  },
+  {
+   "id": "jose-leonardo-ortiz",
+   "name": "José Leonardo Ortiz",
+   "lat": -6.74208,
+   "lon": -79.83421,
+   "district_id": "lambayeque/chiclayo/jose-leonardo-ortiz",
+   "district": "Jose Leonardo Ortiz",
+   "province": "Chiclayo",
+   "region": "lambayeque",
+   "osm": "relation/1969736"
+  },
+  {
+   "id": "la-victoria",
+   "name": "La Victoria",
+   "lat": -6.81923,
+   "lon": -79.85912,
+   "district_id": "lambayeque/chiclayo/la-victoria",
+   "district": "La Victoria",
+   "province": "Chiclayo",
+   "region": "lambayeque",
+   "osm": "relation/1969737"
+  },
+  {
+   "id": "pimentel",
+   "name": "Pimentel",
+   "lat": -6.8208,
+   "lon": -79.91866,
+   "district_id": "lambayeque/chiclayo/pimentel",
+   "district": "Pimentel",
+   "province": "Chiclayo",
+   "region": "lambayeque",
+   "osm": "relation/1969751"
+  },
+  {
+   "id": "reque",
+   "name": "Reque",
+   "lat": -6.8632,
+   "lon": -79.80167,
+   "district_id": "lambayeque/chiclayo/reque",
+   "district": "Reque",
+   "province": "Chiclayo",
+   "region": "lambayeque",
+   "osm": "relation/1969757"
+  },
+  {
+   "id": "monsefu",
+   "name": "Monsefú",
+   "lat": -6.86422,
+   "lon": -79.86707,
+   "district_id": "lambayeque/chiclayo/monsefu",
+   "district": "Monsefu",
+   "province": "Chiclayo",
+   "region": "lambayeque",
+   "osm": "relation/1969742"
+  },
+  {
+   "id": "eten-puerto",
+   "name": "Puerto Eten",
+   "lat": -6.92753,
+   "lon": -79.8659,
+   "district_id": "lambayeque/chiclayo/eten-puerto",
+   "district": "Eten Puerto",
+   "province": "Chiclayo",
+   "region": "lambayeque",
+   "osm": "node/1065153946"
+  },
+  {
+   "id": "santa-rosa",
+   "name": "Santa Rosa",
+   "lat": -6.8831,
+   "lon": -79.91292,
+   "district_id": "lambayeque/chiclayo/santa-rosa",
+   "district": "Santa Rosa",
+   "province": "Chiclayo",
+   "region": "lambayeque",
+   "osm": "relation/1969760"
+  },
+  {
+   "id": "tuman",
+   "name": "Tumán",
+   "lat": -6.77152,
+   "lon": -79.68696,
+   "district_id": "lambayeque/chiclayo/tuman",
+   "district": "Tuman",
+   "province": "Chiclayo",
+   "region": "lambayeque",
+   "osm": "relation/1969762"
+  },
+  {
+   "id": "lambayeque",
+   "name": "Lambayeque",
+   "lat": -6.70303,
+   "lon": -79.90651,
+   "district_id": "lambayeque/lambayeque/lambayeque",
+   "district": "Lambayeque",
+   "province": "Lambayeque",
+   "region": "lambayeque",
+   "osm": "node/347387631"
+  },
+  {
+   "id": "morrope",
+   "name": "Mórrope",
+   "lat": -6.5119,
+   "lon": -80.14062,
+   "district_id": "lambayeque/lambayeque/morrope",
+   "district": "Morrope",
+   "province": "Lambayeque",
+   "region": "lambayeque",
+   "osm": "relation/1969744"
+  },
+  {
+   "id": "motupe",
+   "name": "Motupe",
+   "lat": -6.15443,
+   "lon": -79.71707,
+   "district_id": "lambayeque/lambayeque/motupe",
+   "district": "Motupe",
+   "province": "Lambayeque",
+   "region": "lambayeque",
+   "osm": "relation/1969743"
+  },
+  {
+   "id": "olmos",
+   "name": "Olmos",
+   "lat": -5.98819,
+   "lon": -79.74729,
+   "district_id": "lambayeque/lambayeque/olmos",
+   "district": "Olmos",
+   "province": "Lambayeque",
+   "region": "lambayeque",
+   "osm": "relation/1969747"
+  },
+  {
+   "id": "ferrenafe",
+   "name": "Ferreñafe",
+   "lat": -6.63922,
+   "lon": -79.78798,
+   "district_id": "lambayeque/ferrenafe/ferrenafe",
+   "district": "Ferreñafe",
+   "province": "Ferreñafe",
+   "region": "lambayeque",
+   "osm": "node/320034016"
+  },
+  {
+   "id": "piura",
+   "name": "Piura",
+   "lat": -5.19711,
+   "lon": -80.62666,
+   "district_id": "piura/piura/piura",
+   "district": "Piura",
+   "province": "Piura",
+   "region": "piura",
+   "osm": "node/272379571"
+  },
+  {
+   "id": "castilla",
+   "name": "Castilla",
+   "lat": -5.11161,
+   "lon": -80.53545,
+   "district_id": "piura/piura/castilla",
+   "district": "Castilla",
+   "province": "Piura",
+   "region": "piura",
+   "osm": "relation/1986173"
+  },
+  {
+   "id": "catacaos",
+   "name": "Catacaos",
+   "lat": -5.47328,
+   "lon": -80.35815,
+   "district_id": "piura/piura/catacaos",
+   "district": "Catacaos",
+   "province": "Piura",
+   "region": "piura",
+   "osm": "relation/1986174"
+  },
+  {
+   "id": "sullana",
+   "name": "Sullana",
+   "lat": -4.89006,
+   "lon": -80.68736,
+   "district_id": "piura/sullana/sullana",
+   "district": "Sullana",
+   "province": "Sullana",
+   "region": "piura",
+   "osm": "node/304296640"
+  },
+  {
+   "id": "paita",
+   "name": "Paita",
+   "lat": -5.08516,
+   "lon": -81.11368,
+   "district_id": "piura/paita/paita",
+   "district": "Paita",
+   "province": "Paita",
+   "region": "piura",
+   "osm": "node/6486650875"
+  },
+  {
+   "id": "talara",
+   "name": "Talara",
+   "lat": -4.57969,
+   "lon": -81.27119,
+   "district_id": "piura/talara/parinas",
+   "district": "Pariñas",
+   "province": "Talara",
+   "region": "piura",
+   "osm": "node/409705339"
+  },
+  {
+   "id": "mancora",
+   "name": "Máncora",
+   "lat": -4.1552,
+   "lon": -81.00612,
+   "district_id": "piura/talara/mancora",
+   "district": "Mancora",
+   "province": "Talara",
+   "region": "piura",
+   "osm": "relation/1986203"
+  },
+  {
+   "id": "sechura",
+   "name": "Sechura",
+   "lat": -5.55754,
+   "lon": -80.82233,
+   "district_id": "piura/sechura/sechura",
+   "district": "Sechura",
+   "province": "Sechura",
+   "region": "piura",
+   "osm": "node/2505711675"
+  },
+  {
+   "id": "chulucanas",
+   "name": "Chulucanas",
+   "lat": -5.12898,
+   "lon": -80.19688,
+   "district_id": "piura/morropon/chulucanas",
+   "district": "Chulucanas",
+   "province": "Morropon",
+   "region": "piura",
+   "osm": "relation/1986176"
+  },
+  {
+   "id": "ayabaca",
+   "name": "Ayabaca",
+   "lat": -4.68539,
+   "lon": -79.64526,
+   "district_id": "piura/ayabaca/ayabaca",
+   "district": "Ayabaca",
+   "province": "Ayabaca",
+   "region": "piura",
+   "osm": "relation/1986167"
+  },
+  {
+   "id": "huancabamba",
+   "name": "Huancabamba",
+   "lat": -5.18438,
+   "lon": -79.48508,
+   "district_id": "piura/huancabamba/huancabamba",
+   "district": "Huancabamba",
+   "province": "Huancabamba",
+   "region": "piura",
+   "osm": "relation/1986184"
+  },
+  {
+   "id": "tumbes",
+   "name": "Tumbes",
+   "lat": -3.57079,
+   "lon": -80.45965,
+   "district_id": "tumbes/tumbes/tumbes",
+   "district": "Tumbes",
+   "province": "Tumbes",
+   "region": "tumbes",
+   "osm": "node/338539511"
+  },
+  {
+   "id": "zarumilla",
+   "name": "Zarumilla",
+   "lat": -3.50057,
+   "lon": -80.27499,
+   "district_id": "tumbes/zarumilla/zarumilla",
+   "district": "Zarumilla",
+   "province": "Zarumilla",
+   "region": "tumbes",
+   "osm": "node/761245208"
+  },
+  {
+   "id": "aguas-verdes",
+   "name": "Aguas Verdes",
+   "lat": -3.49526,
+   "lon": -80.24867,
+   "district_id": "tumbes/zarumilla/aguas-verdes",
+   "district": "Aguas Verdes",
+   "province": "Zarumilla",
+   "region": "tumbes",
+   "osm": "relation/1986978"
+  },
+  {
+   "id": "zorritos",
+   "name": "Zorritos",
+   "lat": -3.68053,
+   "lon": -80.67974,
+   "district_id": "tumbes/contralmirante-villar/zorritos",
+   "district": "Zorritos",
+   "province": "Contralmirante Villar",
+   "region": "tumbes",
+   "osm": "node/2460358469"
+  }
+ ]
+}

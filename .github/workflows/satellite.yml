@@ -1,0 +1,98 @@
+name: Satélite NOAA GOES-19 Cada 10 Min (S/ 0)
+
+on:
+  schedule:
+    # Offset by 7 minutes to allow NOAA NODD ingestion from AWS S3
+    - cron: '7,17,27,37,47,57 * * * *'
+  workflow_dispatch:
+    inputs:
+      cold:
+        description: 'Ignore cached regional extracts (cold start)'
+        type: boolean
+        default: false
+      publish:
+        description: 'Publish validated assets to Cloudflare Worker'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: satellite-sync
+  cancel-in-progress: false
+
+jobs:
+  satellite-10m:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install binary wheels
+        run: |
+          pip install --only-binary=:all: -r requirements.txt
+
+      - name: Scientific verification
+        run: |
+          python -m unittest discover -s tests -p test_sat_major.py -v
+
+      - name: Restore regional state
+        id: state
+        if: inputs.cold != true
+        uses: actions/cache/restore@v4
+        with:
+          path: .sat_state
+          key: sat-state-10m-${{ github.run_id }}
+          restore-keys: sat-state-10m-
+
+      - name: Ingest and process NOAA GOES-19 scans
+        run: |
+          python -I sat/pipeline.py \
+            --state .sat_state \
+            --out build/sat \
+            --glm-hours 1.25 \
+            --max-glm 260 \
+            --cadence "cadencia operativa GOES-19 cada 10 min; arquitectura publica 24/7 S/ 0"
+
+      - name: Validate data contract and asset integrity
+        run: |
+          python -m sat.validate --out build/sat --state .sat_state --report build/validation.json
+
+      - name: Publish validated products
+        if: inputs.publish != false
+        env:
+          SAT_PUBLISH_TOKEN: ${{ secrets.SAT_PUBLISH_TOKEN || secrets.PUBLISH_TOKEN }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+        run: |
+          python -I sat/publish.py --out build/sat --state .sat_state --send
+
+      - name: Save regional state
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: .sat_state
+          key: sat-state-10m-${{ github.run_id }}
+
+      - name: Evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: satellite-measurement
+          path: |
+            build/sat/manifest.json
+            build/validation.json
+          retention-days: 1
+
+      - name: Execution telemetry summary
+        if: always()
+        run: |
+          python -c "import json; m=json.load(open('build/sat/manifest.json')); print(json.dumps({'generated_at': m['generated_at'], 'run': m.get('run', {}), 'latest_err': m.get('err', {}).get('latest'), 'cloud_slot': m.get('cloud', {}).get('slot')}, indent=2))" || true

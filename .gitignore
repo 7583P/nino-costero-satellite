@@ -1,0 +1,20 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local processing state & build artifacts
+.sat_state/
+build/
+dist/
+*.npz
+
+# Environment & secrets (never committed)
+.env
+.env.*
+*.secret
+*.token
+
+# IDEs
+.vscode/
+.idea/
