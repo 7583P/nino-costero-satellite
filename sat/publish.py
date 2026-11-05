@@ -66,22 +66,37 @@ def main():
         if spec.get('sha256') != digest or spec.get('bytes') != len(b) or not n.endswith(f'_{digest[:16]}.png'):
             sys.exit('asset integrity failed: ' + n)
 
+    manifest_bundles = manifest.get('bundles', {})
+    for bname, bmeta in manifest_bundles.items():
+        bpath = out / 'bundles' / bname
+        if not bpath.exists():
+            sys.exit(f'manifest references missing bundle: {bname}')
+        bb = bpath.read_bytes()
+        digest = hashlib.sha256(bb).hexdigest()
+        if bmeta.get('sha256') != digest or bmeta.get('bytes') != len(bb) or not bname.endswith(f'_{digest[:16]}.tar'):
+            sys.exit(f'bundle integrity failed: {bname}')
+
     pub_path = st / 'published.json'
     now = datetime.now(timezone.utc)
     today_utc = now.strftime('%Y-%m-%d')
     published = json.loads(pub_path.read_text(encoding='utf-8')) if pub_path.exists() else {}
 
-    # Assets expire after 48h. Filter out fresh ones (published within 33 hours)
+    # Assets and bundles expire after 48h. Filter out fresh ones (published within 33 hours)
     fresh = {k: v for k, v in published.items()
              if datetime.fromisoformat(v) > now - timedelta(hours=TTL_H - 15)}
-    new = sorted(n for n in referenced if n not in fresh)
 
-    planned_writes = len(new) + 1  # assets + manifest
+    bundles_to_upload = sorted([bn for bn in manifest_bundles if bn not in fresh])
+    unbundled_to_upload = sorted([n for n in referenced
+                                  if not manifest.get('assets', {}).get(n, {}).get('bundle') and n not in fresh])
+
+    planned_writes = len(bundles_to_upload) + len(unbundled_to_upload) + 1  # bundles + unbundled assets + manifest
     report = {
         'referenced': len(referenced),
-        'to_upload': len(new),
+        'bundles_to_upload': len(bundles_to_upload),
+        'unbundled_to_upload': len(unbundled_to_upload),
         'kv_writes_planned': planned_writes,
-        'bytes_planned': sum((out / 'assets' / n).stat().st_size for n in new),
+        'bytes_planned': sum((out / 'bundles' / bn).stat().st_size for bn in bundles_to_upload) +
+                         sum((out / 'assets' / n).stat().st_size for n in unbundled_to_upload),
         'daily_cap': DAILY_KV_WRITE_CAP,
     }
 
@@ -150,7 +165,7 @@ def main():
         return
 
     # Check if there is really anything new to publish
-    if len(new) == 0:
+    if len(bundles_to_upload) == 0 and len(unbundled_to_upload) == 0:
         try:
             cur_r = s.get(f'{base}/v3/sat/manifest.json', timeout=10)
             if cur_r.status_code == 200:
@@ -163,6 +178,7 @@ def main():
                     print(json.dumps({
                         'status': 'SKIPPED_NO_NEW_DATA',
                         'note': f'NOAA observation already live ({new_slot}); 0 KV writes performed.',
+                        'uploaded_bundles': 0,
                         'uploaded_assets': 0,
                         'kv_writes': 0,
                         **report
@@ -177,8 +193,20 @@ def main():
 
     t0, sent = time.perf_counter(), 0
 
-    # 1. Upload new assets
-    for n in new:
+    # 1. Upload new bundles
+    for bn in bundles_to_upload:
+        bundle_bytes = (out / 'bundles' / bn).read_bytes()
+        r = s.put(f'{base}/admin/sat/bundle/{bn}', data=bundle_bytes,
+                  headers={'Content-Type': 'application/x-tar'}, timeout=30, allow_redirects=False)
+        if r.status_code != 200:
+            sys.exit(f'bundle upload failed HTTP {r.status_code} for {bn}: {r.text[:200]}')
+        fresh[bn] = now.isoformat()
+        for fn in manifest_bundles.get(bn, {}).get('files', []):
+            fresh[fn] = now.isoformat()
+        sent += 1
+
+    # 2. Upload standalone unbundled assets (if any)
+    for n in unbundled_to_upload:
         asset_bytes = (out / 'assets' / n).read_bytes()
         r = s.put(f'{base}/admin/sat/asset/{n}', data=asset_bytes,
                   headers={'Content-Type': 'image/png'}, timeout=30, allow_redirects=False)
@@ -187,7 +215,7 @@ def main():
         fresh[n] = now.isoformat()
         sent += 1
 
-    # 2. Upload manifest with batch write count for server quota tracking
+    # 3. Upload manifest with batch write count for server quota tracking
     manifest['processing'] = manifest.get('processing', {})
     manifest['processing']['run_kv_writes'] = sent + 1
     manifest_bytes = json.dumps(manifest, separators=(',', ':')).encode('utf-8')
@@ -208,7 +236,8 @@ def main():
 
     print(json.dumps({
         'status': 'PUBLISHED_SUCCESS',
-        'uploaded_assets': sent,
+        'uploaded_bundles': len(bundles_to_upload),
+        'uploaded_assets': len(unbundled_to_upload),
         'kv_writes': sent + 1,
         'server_writes_today_est': server_writes_today + sent + 1,
         'seconds': round(time.perf_counter() - t0, 2),

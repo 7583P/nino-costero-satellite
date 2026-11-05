@@ -242,5 +242,92 @@ class TestSatPublishFailClosed(unittest.TestCase):
         self.assertEqual(out_json.get('kv_writes'), 2)
         self.assertEqual(mock_session.put.call_count, 2)
 
+    @patch('requests.Session')
+    def test_passes_and_publishes_bundle_with_2_kv_writes(self, mock_session_cls):
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
+
+        mock_live_m = MagicMock()
+        mock_live_m.status_code = 200
+        mock_live_m.json.return_value = {'err': {'latest': {'scan_end': '2026-11-05T11:50:00Z'}}}
+
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        mock_quota_resp = MagicMock()
+        mock_quota_resp.status_code = 200
+        mock_quota_resp.json.return_value = {
+            'date_utc': today,
+            'daily_kv_writes': 20,
+            'daily_cap': 750
+        }
+
+        def get_handler(url, **kwargs):
+            if 'quota.json' in url:
+                return mock_quota_resp
+            return mock_live_m
+
+        mock_session.get.side_effect = get_handler
+
+        mock_put_resp = MagicMock()
+        mock_put_resp.status_code = 200
+        mock_put_resp.json.return_value = {'published': True}
+        mock_session.put.return_value = mock_put_resp
+
+        import tarfile, hashlib
+        assets = {}
+        names = []
+        for pfx in ['err', 'cloud', 'cloud2', 'ir']:
+            b = f'bytes for {pfx}'.encode('ascii')
+            h = hashlib.sha256(b).hexdigest()
+            n = f'{pfx}_20261105T1200Z_{h[:16]}.png'
+            assets[n] = {'bytes': len(b), 'sha256': h}
+            names.append(n)
+            (self.out_dir / 'assets' / n).write_bytes(b)
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w', format=tarfile.USTAR_FORMAT) as tar:
+            for n in names:
+                data = (self.out_dir / 'assets' / n).read_bytes()
+                ti = tarfile.TarInfo(name=n)
+                ti.size = len(data)
+                ti.mtime = 1700000000
+                ti.mode = 0o644
+                tar.addfile(ti, io.BytesIO(data))
+        tar_bytes = buf.getvalue()
+        tar_hash = hashlib.sha256(tar_bytes).hexdigest()
+        bname = f'scan_20261105T1200Z_{tar_hash[:16]}.tar'
+        (self.out_dir / 'bundles').mkdir(parents=True, exist_ok=True)
+        (self.out_dir / 'bundles' / bname).write_bytes(tar_bytes)
+
+        for n in names:
+            assets[n]['bundle'] = bname
+
+        manifest = {
+            'schema_version': '2.0.0',
+            'generated_at': '2026-11-05T12:10:00Z',
+            'err': {'latest': {'asset': names[0], 'slot': '2026-11-05T12:00:00Z', 'scan_end': '2026-11-05T12:09:00Z'}, 'timeline': [{'asset': names[0]}], 'accumulations': {}},
+            'cloud': {'slot': '2026-11-05T12:00:00Z', 'assets': {'classes_height_temp': names[1], 'cod_phase_mask': names[2]}, 'ir_timeline': [{'asset': names[3]}]},
+            'assets': assets,
+            'bundles': {bname: {'sha256': tar_hash, 'bytes': len(tar_bytes), 'files': names}}
+        }
+        self.manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+
+        sys.argv = ['publish.py', '--out', str(self.out_dir), '--state', str(self.state_dir), '--send']
+
+        captured = io.StringIO()
+        with patch('sys.stdout', captured):
+            publish.main()
+
+        out_json = json.loads(captured.getvalue().strip())
+        self.assertEqual(out_json.get('uploaded_bundles'), 1)
+        self.assertEqual(out_json.get('uploaded_assets'), 0)
+        self.assertEqual(out_json.get('kv_writes'), 2)
+        self.assertEqual(mock_session.put.call_count, 2)
+        first_call = mock_session.put.call_args_list[0]
+        self.assertIn(f'/admin/sat/bundle/{bname}', first_call[0][0])
+        self.assertEqual(first_call[1]['headers']['Content-Type'], 'application/x-tar')
+        second_call = mock_session.put.call_args_list[1]
+        self.assertIn('/admin/sat/manifest', second_call[0][0])
+
 if __name__ == '__main__':
     unittest.main()
+

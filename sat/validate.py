@@ -18,6 +18,9 @@ def validate(folder, state=None):
         assert len(b)==a['bytes'] and hashlib.sha256(b).hexdigest()==a['sha256'], n
         img=Image.open(io.BytesIO(b));assert img.size==(m['grid']['display']['nx'],m['grid']['display']['ny'])
         assert img.mode=='RGBA'
+    for bn, bmeta in m.get('bundles', {}).items():
+        bb = (folder / 'bundles' / bn).read_bytes()
+        assert len(bb) == bmeta['bytes'] and hashlib.sha256(bb).hexdigest() == bmeta['sha256'], bn
     comparisons={}
     if state:
         frames={}
