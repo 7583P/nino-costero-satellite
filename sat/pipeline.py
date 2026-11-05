@@ -82,7 +82,7 @@ class Peak:
 class State:
     def __init__(self, root: Path):
         self.root = root
-        for d in ('err', 'ir', 'glm'):
+        for d in ('err', 'ir', 'glm', 'acc'):
             (root / d).mkdir(parents=True, exist_ok=True)
 
     def err_slots(self):
@@ -133,6 +133,13 @@ class State:
         for p in (self.root / 'glm').glob('*.json'):
             if datetime.strptime(p.stem, '%Y%m%d%H').replace(tzinfo=UTC) < cut:
                 p.unlink()
+        for p in (self.root / 'acc').glob('*.png'):
+            try:
+                ts_str = p.stem.split('_', 1)[1]
+                if from_stamp(ts_str) < cut:
+                    p.unlink()
+            except Exception:
+                pass
 
 
 # ------------------------------------------------------------------ masks
@@ -248,14 +255,22 @@ def main():
             v = cur['raw'].astype(float) * 0.1
             return A.area_stats(v, cur['valid'], mask, (0.1, 1, 5, 10))
 
-        # accumulations
+        # accumulations: numeric values are calculated every 10 min for total scientific precision;
+        # raster PNG maps are anchored hourly to stay strictly within S/ 0 Cloudflare KV quotas.
         accs = {}
+        hourly_slot = latest_slot.replace(minute=0, second=0, microsecond=0) if latest_slot else None
         for hrs in A.WINDOWS_H:
             acc, ok, info = A.accumulate(frames, latest_slot, hrs) if latest_slot else (None, None, {'complete': False, 'hours': hrs, 'reason': 'sin escaneos ERR'})
-            if acc is not None:
-                name = f'acc{hrs}h_{stamp(latest_slot)}.png'
-                assets[name] = E.acc_png(acc, ok)
-                info['asset'] = name
+            if acc is not None and hourly_slot:
+                acc_name = f'acc{hrs}h_{stamp(hourly_slot)}.png'
+                acc_cache_file = st.root / 'acc' / acc_name
+                if latest_slot.minute == 0 or not acc_cache_file.exists():
+                    png_bytes = E.acc_png(acc, ok)
+                    acc_cache_file.write_bytes(png_bytes)
+                else:
+                    png_bytes = acc_cache_file.read_bytes()
+                assets[acc_name] = png_bytes
+                info['asset'] = acc_name
             accs[hrs] = (acc, ok, info)
 
         # GLM flashes and coverage

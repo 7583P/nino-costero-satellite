@@ -2,8 +2,8 @@ name: Satélite NOAA GOES-19 Cada 10 Min (S/ 0)
 
 on:
   schedule:
-    # Offset by 7 minutes to allow NOAA NODD ingestion from AWS S3
-    - cron: '7,17,27,37,47,57 * * * *'
+    # Cadencia continua cada 10 minutos (minutos :00, :10, :20, :30, :40, :50)
+    - cron: '*/10 * * * *'
   workflow_dispatch:
     inputs:
       cold:
@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: satellite-sync
@@ -81,6 +82,18 @@ jobs:
         with:
           path: .sat_state
           key: sat-state-10m-${{ github.run_id }}
+
+      - name: Prune older state caches (keep latest 2 to prevent 10 GB limit exhaustion)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh cache list --repo ${{ github.repository }} --key sat-state-10m- --json id,createdAt --jq 'sort_by(.createdAt) | reverse | .[2:] | .[].id' | while read id; do
+            if [ -n "$id" ]; then
+              echo "Pruning older cache ID $id..."
+              gh cache delete "$id" --repo ${{ github.repository }} || true
+            fi
+          done
 
       - name: Evidence artifact
         if: always()

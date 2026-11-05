@@ -46,3 +46,4 @@ Procesar escaneos auténticos del satélite geoestacionario NOAA GOES-19 con cad
 
 ## Licencia
 Código abierto bajo licencia MIT. Las observaciones satelitales provienen de NOAA Open Data Dissemination (dominio público). Límites geográficos: IGN Perú / OCHA / geoBoundaries (CC BY 3.0 IGO).
+
