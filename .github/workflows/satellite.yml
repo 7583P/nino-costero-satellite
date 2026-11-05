@@ -44,7 +44,7 @@ jobs:
 
       - name: Scientific verification
         run: |
-          python -m unittest discover -s tests -p test_sat_major.py -v
+          python -m unittest discover -s tests -p "test_sat_*.py" -v
 
       - name: Restore regional state
         id: state
