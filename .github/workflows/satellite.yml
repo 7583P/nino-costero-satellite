@@ -48,7 +48,7 @@ jobs:
 
       - name: Restore regional state
         id: state
-        if: inputs.cold != true
+        if: github.event_name == 'schedule' || inputs.cold != true
         uses: actions/cache/restore@v4
         with:
           path: .sat_state
@@ -69,7 +69,7 @@ jobs:
           python -m sat.validate --out build/sat --state .sat_state --report build/validation.json
 
       - name: Publish validated products
-        if: inputs.publish != false
+        if: github.event_name == 'schedule' || inputs.publish != false
         env:
           SAT_PUBLISH_TOKEN: ${{ secrets.SAT_PUBLISH_TOKEN || secrets.PUBLISH_TOKEN }}
           WORKER_URL: ${{ secrets.WORKER_URL }}

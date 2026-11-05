@@ -5,6 +5,7 @@ Env:
   WORKER_URL (https://<worker-host>; only origin is used)
 
 Features:
+- FAIL-CLOSED quota check: Refuses publication if live server quota cannot be verified.
 - Global server-authoritative KV write quota guard (/v3/sat/quota.json).
 - Zero local cache dependency for quota enforcement.
 - Skip publication entirely (0 KV writes) when no new data exists.
@@ -67,6 +68,7 @@ def main():
 
     pub_path = st / 'published.json'
     now = datetime.now(timezone.utc)
+    today_utc = now.strftime('%Y-%m-%d')
     published = json.loads(pub_path.read_text(encoding='utf-8')) if pub_path.exists() else {}
 
     # Assets expire after 48h. Filter out fresh ones (published within 33 hours)
@@ -98,21 +100,45 @@ def main():
 
     s = requests.Session()
     s.headers['Authorization'] = f'Bearer {token}'
-    s.headers['User-Agent'] = 'NinoCostero-SatPublisher/2.3.1'
+    s.headers['User-Agent'] = 'NinoCostero-SatPublisher/2.3.2'
 
-    # Check live server-side quota before uploading anything
-    server_writes_today = 0
+    # -------------------------------------------------------------
+    # FAIL-CLOSED QUOTA CHECK
+    # Must obtain a valid, verifiable, current UTC-date quota response
+    # from the Cloudflare Worker. If unreachable, non-200, invalid JSON,
+    # or date mismatch, it MUST FAIL-CLOSED (refuse to upload any assets).
+    # -------------------------------------------------------------
+    server_writes_today = None
     server_cap = DAILY_KV_WRITE_CAP
+
     try:
-        qr = s.get(f'{base}/v3/sat/quota.json', timeout=10)
-        if qr.status_code == 200:
-            qd = qr.json()
-            server_writes_today = int(qd.get('daily_kv_writes', 0))
-            server_cap = int(qd.get('daily_cap', DAILY_KV_WRITE_CAP))
-            report['server_daily_writes_used'] = server_writes_today
-            report['server_quota_status'] = qd.get('status')
-    except Exception as e:
-        print(f'Warning: live quota check unavailable ({e}); proceeding with conservative limits', file=sys.stderr)
+        qr = s.get(f'{base}/v3/sat/quota.json', timeout=15)
+        if qr.status_code != 200:
+            msg = f'FAIL-CLOSED: Live quota endpoint returned HTTP {qr.status_code}'
+            print(json.dumps({'status': 'ABORTED_FAIL_CLOSED', 'error': msg, 'http_status': qr.status_code}))
+            sys.exit(msg)
+        qd = qr.json()
+        if not isinstance(qd, dict) or 'daily_kv_writes' not in qd or 'date_utc' not in qd:
+            msg = 'FAIL-CLOSED: Quota payload invalid or malformed'
+            print(json.dumps({'status': 'ABORTED_FAIL_CLOSED', 'error': msg, 'payload': qd}))
+            sys.exit(msg)
+        if qd['date_utc'] != today_utc:
+            msg = f'FAIL-CLOSED: Quota date mismatch (server {qd["date_utc"]} vs client {today_utc})'
+            print(json.dumps({'status': 'ABORTED_FAIL_CLOSED', 'error': msg}))
+            sys.exit(msg)
+
+        server_writes_today = int(qd['daily_kv_writes'])
+        server_cap = int(qd.get('daily_cap', DAILY_KV_WRITE_CAP))
+        report['server_daily_writes_used'] = server_writes_today
+        report['server_quota_status'] = qd.get('status')
+        report['server_quota_date'] = qd.get('date_utc')
+    except requests.RequestException as e:
+        msg = f'FAIL-CLOSED: Network error querying live quota endpoint: {e}'
+        print(json.dumps({'status': 'ABORTED_FAIL_CLOSED', 'error': str(e)}))
+        sys.exit(msg)
+
+    if server_writes_today is None:
+        sys.exit('FAIL-CLOSED: Quota verification unconfirmed')
 
     if server_writes_today + planned_writes > server_cap:
         print(json.dumps({
