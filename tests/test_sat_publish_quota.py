@@ -327,6 +327,49 @@ class TestSatPublishFailClosed(unittest.TestCase):
         self.assertEqual(first_call[1]['headers']['Content-Type'], 'application/x-tar')
         second_call = mock_session.put.call_args_list[1]
         self.assertIn('/admin/sat/manifest', second_call[0][0])
+        pub_saved = json.loads((self.state_dir / 'published.json').read_text(encoding='utf-8'))
+        self.assertIn(bname, pub_saved)
+        self.assertNotIn(names[0], pub_saved)
+
+    @patch('requests.Session')
+    def test_graceful_throttle_on_http_503_storage_unavailable(self, mock_session_cls):
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
+
+        mock_live_m = MagicMock()
+        mock_live_m.status_code = 200
+        mock_live_m.json.return_value = {'err': {'latest': {'scan_end': '2026-11-05T11:50:00Z'}}}
+
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        mock_quota_resp = MagicMock()
+        mock_quota_resp.status_code = 200
+        mock_quota_resp.json.return_value = {
+            'date_utc': today,
+            'daily_kv_writes': 100,
+            'daily_cap': 750
+        }
+
+        def get_handler(url, **kwargs):
+            if 'quota.json' in url:
+                return mock_quota_resp
+            return mock_live_m
+
+        mock_session.get.side_effect = get_handler
+
+        mock_put_resp = MagicMock()
+        mock_put_resp.status_code = 503
+        mock_put_resp.text = '{"error":"publication_storage_unavailable"}'
+        mock_session.put.return_value = mock_put_resp
+
+        sys.argv = ['publish.py', '--out', str(self.out_dir), '--state', str(self.state_dir), '--send']
+
+        captured = io.StringIO()
+        with patch('sys.stdout', captured):
+            publish.main()
+
+        out_json = json.loads(captured.getvalue().strip())
+        self.assertEqual(out_json.get('status'), 'THROTTLED_STORAGE_QUOTA_REACHED')
+        self.assertTrue((self.state_dir / 'published.json').exists())
 
 if __name__ == '__main__':
     unittest.main()

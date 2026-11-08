@@ -193,16 +193,31 @@ def main():
 
     t0, sent = time.perf_counter(), 0
 
+    def save_published():
+        st.mkdir(parents=True, exist_ok=True)
+        pub_path.write_text(json.dumps({k: v for k, v in fresh.items()
+                                        if datetime.fromisoformat(v) > now - timedelta(hours=TTL_H)}),
+                            encoding='utf-8')
+
     # 1. Upload new bundles
     for bn in bundles_to_upload:
         bundle_bytes = (out / 'bundles' / bn).read_bytes()
         r = s.put(f'{base}/admin/sat/bundle/{bn}', data=bundle_bytes,
                   headers={'Content-Type': 'application/x-tar'}, timeout=30, allow_redirects=False)
+        if r.status_code in (429, 503) and ('publication_storage_unavailable' in r.text or 'quota' in r.text.lower()):
+            save_published()
+            print(json.dumps({
+                'status': 'THROTTLED_STORAGE_QUOTA_REACHED',
+                'warning': f'Cloudflare KV storage/write limit reached during bundle upload ({bn}). State preserved.',
+                'http_status': r.status_code,
+                **report
+            }))
+            return
         if r.status_code != 200:
+            save_published()
             sys.exit(f'bundle upload failed HTTP {r.status_code} for {bn}: {r.text[:200]}')
         fresh[bn] = now.isoformat()
-        for fn in manifest_bundles.get(bn, {}).get('files', []):
-            fresh[fn] = now.isoformat()
+        save_published()
         sent += 1
 
     # 2. Upload standalone unbundled assets (if any)
@@ -210,9 +225,20 @@ def main():
         asset_bytes = (out / 'assets' / n).read_bytes()
         r = s.put(f'{base}/admin/sat/asset/{n}', data=asset_bytes,
                   headers={'Content-Type': 'image/png'}, timeout=30, allow_redirects=False)
+        if r.status_code in (429, 503) and ('publication_storage_unavailable' in r.text or 'quota' in r.text.lower()):
+            save_published()
+            print(json.dumps({
+                'status': 'THROTTLED_STORAGE_QUOTA_REACHED',
+                'warning': f'Cloudflare KV storage/write limit reached during asset upload ({n}). State preserved.',
+                'http_status': r.status_code,
+                **report
+            }))
+            return
         if r.status_code != 200:
+            save_published()
             sys.exit(f'asset upload failed HTTP {r.status_code} for {n}: {r.text[:200]}')
         fresh[n] = now.isoformat()
+        save_published()
         sent += 1
 
     # 3. Upload manifest with batch write count for server quota tracking
@@ -223,16 +249,24 @@ def main():
     r = s.put(f'{base}/admin/sat/manifest', data=manifest_bytes,
               headers={'Content-Type': 'application/json'}, timeout=30, allow_redirects=False)
     if r.status_code == 409 and 'older_manifest_rejected' in r.text:
+        save_published()
         print(json.dumps({'status': 'SKIPPED_OLDER_MANIFEST', 'note': 'Remote manifest is newer or identical'}))
         return
+    if r.status_code in (429, 503) and ('publication_storage_unavailable' in r.text or 'quota' in r.text.lower()):
+        save_published()
+        print(json.dumps({
+            'status': 'THROTTLED_STORAGE_QUOTA_REACHED',
+            'warning': 'Cloudflare KV storage/write limit reached during manifest upload. State preserved.',
+            'http_status': r.status_code,
+            **report
+        }))
+        return
     if r.status_code != 200:
+        save_published()
         sys.exit(f'manifest upload failed HTTP {r.status_code}: {r.text[:300]}')
 
     # Update state
-    st.mkdir(parents=True, exist_ok=True)
-    pub_path.write_text(json.dumps({k: v for k, v in fresh.items()
-                                    if datetime.fromisoformat(v) > now - timedelta(hours=TTL_H)}),
-                        encoding='utf-8')
+    save_published()
 
     print(json.dumps({
         'status': 'PUBLISHED_SUCCESS',

@@ -459,24 +459,29 @@ def main():
     assets = {names[n]: b for n,b in assets.items()}
     manifest['assets'] = {n:{'sha256':hashlib.sha256(b).hexdigest(),'bytes':len(b)} for n,b in assets.items()}
 
-    # ---------------- Tar bundling for KV write reduction (Niño Costero 2.3.5)
+    # ---------------- Tar bundling for KV write reduction (Niño Costero 2.3.6)
     bundles = {}
-    scan_files = {}
-    cur_err = manifest.get('err', {}).get('latest', {}).get('asset')
-    if cur_err and cur_err in assets:
-        scan_files[cur_err] = assets[cur_err]
-    if manifest.get('cloud'):
-        c_assets = manifest['cloud'].get('assets', {})
-        for k in ('classes_height_temp', 'cod_phase_mask'):
-            cn = c_assets.get(k)
-            if cn and cn in assets:
-                scan_files[cn] = assets[cn]
-        ir_tl = manifest['cloud'].get('ir_timeline', [])
-        if ir_tl:
-            latest_ir = ir_tl[-1].get('asset')
-            if latest_ir and latest_ir in assets:
-                scan_files[latest_ir] = assets[latest_ir]
+    # 1. Hourly accumulations bundle: acc1h, acc3h, acc6h, acc12h, acc24h
+    acc_files = {}
+    for h in A.WINDOWS_H:
+        acc_meta = manifest.get('err', {}).get('accumulations', {}).get(str(h), {})
+        an = acc_meta.get('asset')
+        if an and an in assets:
+            acc_files[an] = assets[an]
 
+    if len(acc_files) >= 1:
+        acc_slot_dt = hourly_slot if 'hourly_slot' in locals() and hourly_slot else (latest_slot or now)
+        mtime_epoch = int(acc_slot_dt.timestamp()) if isinstance(acc_slot_dt, datetime) else 1700000000
+        acc_tar, acc_hash = make_tar_bundle(acc_files, mtime=mtime_epoch)
+        acc_bname = f"acc_{stamp(acc_slot_dt)}_{acc_hash[:16]}.tar"
+        bundles[acc_bname] = {'sha256': acc_hash, 'bytes': len(acc_tar), 'files': list(acc_files.keys()), 'bytes_tar': acc_tar}
+        for fn in acc_files:
+            manifest['assets'][fn]['bundle'] = acc_bname
+
+    # 2. Scan + timeline bundle: all remaining referenced assets (latest ERR, ERR timeline,
+    # cloud top/phase/mask rasters, and IR timeline) so unbundled_to_upload is always 0
+    # and historical timeline frames never lose their bundle reference across 10-min cycles.
+    scan_files = {fn: b for fn, b in assets.items() if fn not in acc_files}
     if scan_files:
         slot_dt = latest_slot or cloud_slot or now
         mtime_epoch = int(slot_dt.timestamp()) if isinstance(slot_dt, datetime) else 1700000000
@@ -485,23 +490,6 @@ def main():
         bundles[scan_bname] = {'sha256': scan_hash, 'bytes': len(scan_tar), 'files': list(scan_files.keys()), 'bytes_tar': scan_tar}
         for fn in scan_files:
             manifest['assets'][fn]['bundle'] = scan_bname
-
-    # Hourly accumulations bundle: acc1h, acc3h, acc6h, acc12h, acc24h
-    acc_files = {}
-    for h in A.WINDOWS_H:
-        acc_meta = manifest.get('err', {}).get('accumulations', {}).get(str(h), {})
-        an = acc_meta.get('asset')
-        if an and an in assets:
-            acc_files[an] = assets[an]
-
-    if len(acc_files) >= 2:
-        acc_slot_dt = hourly_slot if 'hourly_slot' in locals() and hourly_slot else (latest_slot or now)
-        mtime_epoch = int(acc_slot_dt.timestamp()) if isinstance(acc_slot_dt, datetime) else 1700000000
-        acc_tar, acc_hash = make_tar_bundle(acc_files, mtime=mtime_epoch)
-        acc_bname = f"acc_{stamp(acc_slot_dt)}_{acc_hash[:16]}.tar"
-        bundles[acc_bname] = {'sha256': acc_hash, 'bytes': len(acc_tar), 'files': list(acc_files.keys()), 'bytes_tar': acc_tar}
-        for fn in acc_files:
-            manifest['assets'][fn]['bundle'] = acc_bname
 
     manifest['bundles'] = {bn: {'sha256': bd['sha256'], 'bytes': bd['bytes'], 'files': bd['files']} for bn, bd in bundles.items()}
     manifest['errors'] = {k: v[:20] for k, v in errors.items() if v}
