@@ -1,0 +1,78 @@
+name: DWD ICON-EPS Ingestion and Validation (S/ 0)
+
+on:
+  schedule:
+    # 00Z run becomes available on DWD around 02:45-03:15 UTC
+    - cron: '30 3 * * *'
+    # 12Z run becomes available on DWD around 14:45-15:15 UTC
+    - cron: '30 15 * * *'
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Specific DWD run ID (e.g. 2026110812 or "latest")'
+        required: false
+        default: 'latest'
+      steps:
+        description: 'Number of hourly steps (1-24)'
+        required: false
+        default: '24'
+
+concurrency:
+  group: dwd-icon-eps-sync
+  cancel-in-progress: false
+
+jobs:
+  extract-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install system dependencies for ecCodes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeccodes-tools libeccodes-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests urllib3 psutil eccodes
+
+      - name: Execute DWD ICON-EPS 24-Hour Extraction
+        run: |
+          RUN_ARG="${{ github.event.inputs.run_id || 'latest' }}"
+          STEPS_ARG="${{ github.event.inputs.steps || '24' }}"
+          echo "Executing extraction for run: $RUN_ARG, steps: $STEPS_ARG"
+          PYTHONPATH=.:scripts python scripts/extract_icon_hourly.py --run "$RUN_ARG" --steps "$STEPS_ARG"
+
+      - name: Run Scientific Validation Tests
+        run: |
+          PYTHONPATH=.:scripts python tests/test_icon_eps.py
+
+      - name: Preserve scientific evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dwd-scientific-evidence
+          path: |
+            results/processed/icon_hourly_extraction_*.json
+            public/v2/hourly/*.json
+          retention-days: 1
+
+      - name: Publish to Cloudflare Worker KV
+        if: (env.PUBLISH_TOKEN != '' || env.SAT_PUBLISH_TOKEN != '') && env.WORKER_URL != ''
+        env:
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          SAT_PUBLISH_TOKEN: ${{ secrets.SAT_PUBLISH_TOKEN }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+        run: |
+          echo "Publishing validated hourly forecast to Cloudflare Worker..."
+          PYTHONPATH=.:scripts python scripts/publish_hourly_snapshot.py --send

@@ -110,3 +110,39 @@ jobs:
         if: always()
         run: |
           python -c "import json; m=json.load(open('build/sat/manifest.json')); print(json.dumps({'generated_at': m['generated_at'], 'run': m.get('run', {}), 'latest_err': m.get('err', {}).get('latest'), 'cloud_slot': m.get('cloud', {}).get('slot')}, indent=2))" || true
+
+      - name: Auto-dispatch DWD ICON-EPS when live forecast run is older than 14.5h
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+        run: |
+          python -c "
+          import json, os, subprocess, urllib.request
+          from datetime import datetime, timezone
+          base = (os.getenv('WORKER_URL') or 'https://nino-costero-api.matiasxdfuaqpro910.workers.dev').rstrip('/')
+          for suffix in ('/admin/sat/manifest', '/admin/hourly', '/admin/snapshot'):
+              if base.endswith(suffix):
+                  base = base[:-len(suffix)]
+          try:
+              req = urllib.request.Request(f'{base}/v2/hourly/piura.json', headers={'User-Agent': 'NinoCostero-Scheduler/2.5'})
+              with urllib.request.urlopen(req, timeout=10) as r:
+                  doc = json.loads(r.read().decode('utf-8'))
+              run_utc = datetime.fromisoformat(doc['run']['run_utc'].replace('Z', '+00:00'))
+              age_h = (datetime.now(timezone.utc) - run_utc).total_seconds() / 3600.0
+              print(f'Live DWD ICON-EPS run={doc[\"run\"][\"run_id\"]} age={age_h:.2f}h')
+              if age_h >= 14.8:
+                  out = subprocess.check_output(['gh', 'run', 'list', '--workflow', 'dwd_icon_eps.yml', '--limit', '1', '--json', 'status,createdAt'], text=True)
+                  runs = json.loads(out)
+                  can_dispatch = True
+                  if runs:
+                      st = runs[0].get('status')
+                      created = datetime.fromisoformat(runs[0]['createdAt'].replace('Z', '+00:00'))
+                      if st in ('in_progress', 'queued', 'waiting') or (datetime.now(timezone.utc) - created).total_seconds() < 3600:
+                          can_dispatch = False
+                  if can_dispatch:
+                      print('Dispatching dwd_icon_eps.yml workflow...')
+                      subprocess.run(['gh', 'workflow', 'run', 'dwd_icon_eps.yml'], check=False)
+          except Exception as e:
+              print('DWD check skipped:', e)
+          " || true
