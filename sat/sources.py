@@ -226,6 +226,8 @@ def glm_read(item, bbox):
             off_v = h['flash_time_offset_of_first_event']
             off = _decode(off_v)
             en = _decode(h['flash_energy'])
+            fid = _decode(h['flash_id'], scaled=False) if 'flash_id' in h else None
+            farea = _decode(h['flash_area']) if 'flash_area' in h else None
             m = re.match(r'seconds since (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)', _attr(off_v.attrs['units']))
             if not m:
                 raise ValueError('unexpected GLM time units')
@@ -236,8 +238,16 @@ def glm_read(item, bbox):
                 event_time = base + timedelta(seconds=float(off[i]))
                 if not item['start'] - timedelta(seconds=1) <= event_time <= item['end'] + timedelta(seconds=1):
                     continue
-                flashes.append({'t': iso(event_time),
-                                'lat': round(float(lat[i]), 4), 'lon': round(float(lon[i]), 4),
-                                'energy_fJ': round(float(en[i]) * 1e15, 1)})
+                rec = {'t': iso(event_time),
+                       'lat': round(float(lat[i]), 4), 'lon': round(float(lon[i]), 4),
+                       'energy_fJ': round(float(en[i]) * 1e15, 1),
+                       'quality': int(q[i])}
+                if fid is not None and np.isfinite(fid[i]):
+                    rec['id'] = int(fid[i])
+                if farea is not None and np.isfinite(farea[i]):
+                    # NOAA GLM flash_area is in km^2 (or m^2 depending on product rev); store raw scaled >1000 as km^2 safely
+                    av = float(farea[i])
+                    rec['area_km2'] = round(av / 1e6 if av > 10000 else av, 2)
+                flashes.append(rec)
     return {'file': item['key'].rsplit('/', 1)[-1], 'start': iso(item['start']), 'end': iso(item['end']),
             'flashes': flashes, 'bytes': len(r.content), 'seconds': round(time.perf_counter() - t, 3)}
