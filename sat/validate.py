@@ -4,7 +4,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import numpy as np
 from PIL import Image
 from . import analysis as A, grid as G
@@ -23,6 +23,8 @@ def validate(folder, state=None):
         assert len(bb) == bmeta['bytes'] and hashlib.sha256(bb).hexdigest() == bmeta['sha256'], bn
     comparisons={}
     if state:
+        versioned_state = Path(state) / m.get('grid', {}).get('id', '')
+        state = versioned_state if (versioned_state / 'err').is_dir() else Path(state)
         frames={}
         for p in (Path(state)/'err').glob('*.npz'):
             z=np.load(p);t=datetime.strptime(p.stem,'%Y%m%dT%H%MZ').replace(tzinfo=timezone.utc)
@@ -30,9 +32,12 @@ def validate(folder, state=None):
         end=datetime.fromisoformat(m['err']['latest']['slot'].replace('Z','+00:00'))
         rr,cc=G.display_index();inside=rr>=0
         for h in A.WINDOWS_H:
-            acc,ok,info=A.accumulate(frames,end,h)
             acc_meta = m['err']['accumulations'].get(str(h), {})
+            target_end = datetime.fromisoformat(acc_meta['valid_to'].replace('Z', '+00:00')) if acc_meta.get('valid_to') else end
+            target_slot = target_end - timedelta(minutes=10)
+            acc,ok,info=A.accumulate(frames,target_slot,h)
             assert info['complete']==acc_meta.get('complete')
+            assert not acc_meta.get('complete') or acc_meta.get('asset'), 'complete accumulation requires a matching raster'
             if not acc_meta.get('complete') or not acc_meta.get('asset'):continue
             asset_name = acc_meta['asset']
             try:

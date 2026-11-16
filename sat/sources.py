@@ -67,6 +67,8 @@ def err_catalog(now: datetime, hours: int):
             if not k['key'].endswith('.nc') or '_g19_' not in k['key']:
                 continue
             s, e, c = _stamps(k['key'])
+            if e > now or c > now:
+                continue
             items.append({**k, 'start': s, 'end': e, 'created': c, 'slot': slot_of(s)})
     # one file per slot: keep the latest created (reprocessing)
     best = {}
@@ -79,7 +81,7 @@ def err_catalog(now: datetime, hours: int):
 def err_read(item):
     t = time.perf_counter()
     f = RangeFile(ERR_BUCKET, item['key'], size=item['size'], etag=item['etag'], product='ERR', block_size=16384,
-                  max_bytes=3_000_000)
+                  max_bytes=8_000_000)
     with h5py.File(f, 'r') as h:
         v = h['RRQPE']
         if v.shape != (grid.NFULL, grid.NFULL):
@@ -121,6 +123,8 @@ def abi_catalog(product: str, now: datetime, hours: int, band: str | None = None
             if '-M6' not in k['key'] or (band and band not in k['key']):
                 continue
             s, e, c = _stamps(k['key'])
+            if e > now or c > now:
+                continue
             slot = slot_of(s)
             if slot not in out or c > out[slot]['created']:
                 out[slot] = {**k, 'start': s, 'end': e, 'created': c, 'slot': slot, 'product': product}
@@ -146,7 +150,7 @@ def abi_read(item):
     var, rule = ABI[product]
     t = time.perf_counter()
     f = RangeFile(GOES_BUCKET, item['key'], size=item['size'], etag=item['etag'], product=product,
-                  block_size=65536, max_bytes=5_000_000)
+                  block_size=65536, max_bytes=12_000_000)
     with h5py.File(f, 'r') as h:
         if _attr(h.attrs['platform_ID']) != 'G19':
             raise ValueError('not G19')
@@ -182,6 +186,63 @@ def abi_read(item):
             'seconds': round(time.perf_counter() - t, 3)}
 
 
+def decode_cmi(v, dqf, window):
+    """Decode packed NOAA CMI with its original calibration and per-band DQF.
+
+    Used for the native 2-km MCMIP grid, not for upsampling the separate C01/02
+    high-resolution products. The returned reflectances are not gamma corrected.
+    """
+    raw = np.asarray(v[window])
+    if str(_attr(v.attrs.get('_Unsigned', 'false'))).lower() == 'true' and raw.dtype.kind == 'i':
+        raw = raw.view(np.dtype('u' + str(raw.dtype.itemsize)))
+    fill = v.attrs.get('_FillValue')
+    missing = np.zeros(raw.shape, bool)
+    if fill is not None:
+        missing = raw == np.asarray(fill).astype(raw.dtype, casting='unsafe').reshape(-1)[0]
+    values = raw.astype(np.float32) * float(_attr(v.attrs.get('scale_factor', 1))) + float(_attr(v.attrs.get('add_offset', 0)))
+    quality = np.asarray(dqf[window])
+    usable = ~missing & (quality == 0) & np.isfinite(values)
+    values[~usable] = np.nan
+    return values
+
+
+def abi_visible_read(item):
+    """Three *observed* reflectance bands from official MCMIPF on the 2-km grid.
+
+    MCMIPF is NOAA's co-registered multispectral product. It avoids pretending
+    that C02's separate native 0.5-km sampling exists in this 2-km distribution.
+    """
+    t = time.perf_counter()
+    f = RangeFile(GOES_BUCKET, item['key'], size=item['size'], etag=item['etag'],
+                  product='ABI-L2-MCMIPF-visible', block_size=65536, max_bytes=20_000_000)
+    channels = {}
+    with h5py.File(f, 'r') as h:
+        if _attr(h.attrs['platform_ID']) != 'G19':
+            raise ValueError('not G19')
+        p = h['goes_imager_projection'].attrs
+        if abs(float(_attr(p['longitude_of_projection_origin'])) + 75) > 1e-6:
+            raise ValueError('unexpected visible projection origin')
+        for name in ('C01', 'C02', 'C03'):
+            v = h[f'CMI_{name}']
+            if v.shape != (grid.NFULL, grid.NFULL):
+                raise ValueError(f'MCMIP {name} must use the official 2-km grid')
+            if _attr(v.attrs.get('units', '1')) not in ('1', 'reflectance factor'):
+                raise ValueError(f'unexpected reflectance units for {name}')
+            channels[name] = decode_cmi(v, h[f'DQF_{name}'], (slice(grid.R0, grid.R1), slice(grid.C0, grid.C1)))
+        for axis, index, expected in [('x', grid.C0, grid.X0 + grid.C0 * grid.STEP), ('y', grid.R0, grid.Y0 - grid.R0 * grid.STEP)]:
+            a = h[axis]
+            coord = float(np.asarray(a[index]) * _attr(a.attrs['scale_factor']) + _attr(a.attrs['add_offset']))
+            if abs(coord - expected) > 1e-7:
+                raise ValueError('MCMIP navigation grid mismatch')
+        meta = {'product': 'ABI-L2-MCMIPF', 'bands': ['C01', 'C02', 'C03'], 'units': '1',
+                'time_coverage_start': _attr(h.attrs['time_coverage_start']),
+                'time_coverage_end': _attr(h.attrs['time_coverage_end']),
+                'resolution': '2 km at nadir (NOAA MCMIP resampling)',
+                'file': item['key'].rsplit('/', 1)[-1], 'key': item['key'], 'etag': item['etag']}
+    return {'channels': channels, 'meta': meta, 'bytes': f.received,
+            'seconds': round(time.perf_counter() - t, 3)}
+
+
 # ----------------------------------------------------------------------------- GLM
 def _decode(v, scaled=True):
     raw = np.asarray(v[:])
@@ -199,6 +260,8 @@ def glm_catalog(now: datetime, hours: int):
         for k in list_keys(GOES_BUCKET, f'GLM-L2-LCFA/{h:%Y/%j/%H}/', product='listing'):
             if k['key'].endswith('.nc'):
                 s, e, c = _stamps(k['key'])
+                if e > now or c > now:
+                    continue
                 if (s,e) not in out or c > out[s,e]['created']:
                     out[s,e] = {**k, 'start': s, 'end': e, 'created': c}
     return sorted(out.values(), key=lambda i: i['start'])

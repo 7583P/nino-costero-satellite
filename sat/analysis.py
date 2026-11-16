@@ -9,12 +9,32 @@ Rules (documented in the manifest):
 """
 from __future__ import annotations
 
+import calendar
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
 SLOT_H = 10 / 60
 WINDOWS_H = (1, 3, 6, 12, 24)
+
+
+def solar_cosine(lat, lon, when):
+    """Solar zenith cosine (NOAA fractional-year approximation, UTC input).
+
+    Used only as a conservative day/night display mask, not to alter radiometry.
+    A 5-degree elevation cutoff avoids claiming visible imagery at night/twilight.
+    """
+    when = when.astimezone(timezone.utc)
+    hour = when.hour + when.minute / 60 + when.second / 3600
+    gamma = 2 * np.pi / (366 if calendar.isleap(when.year) else 365) * (when.timetuple().tm_yday - 1 + (hour - 12) / 24)
+    equation = 229.18 * (0.000075 + 0.001868 * np.cos(gamma) - 0.032077 * np.sin(gamma)
+                        - 0.014615 * np.cos(2 * gamma) - 0.040849 * np.sin(2 * gamma))
+    decl = (0.006918 - 0.399912 * np.cos(gamma) + 0.070257 * np.sin(gamma)
+            - 0.006758 * np.cos(2 * gamma) + 0.000907 * np.sin(2 * gamma)
+            - 0.002697 * np.cos(3 * gamma) + 0.00148 * np.sin(3 * gamma))
+    ha = np.radians((hour * 60 + equation + 4 * np.asarray(lon)) / 4 - 180)
+    phi = np.radians(lat)
+    return np.sin(phi) * np.sin(decl) + np.cos(phi) * np.cos(decl) * np.cos(ha)
 
 # ------------------------------------------------------------------ rain index (mirror of web)
 RAIN_LEVELS = [

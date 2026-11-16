@@ -89,3 +89,23 @@ def cloud_png(cls, cth, ctt):
 def cloud2_png(cod, phase, acm):
     f = lambda a: np.where(np.isfinite(a), np.clip(np.rint(a), 0, 254), 255).astype(np.uint8)
     return _png(_to_display(f(cod), 255)[0], _to_display(f(phase), 255)[0], _to_display(f(acm), 255)[0])
+
+
+def visible_png(channels, daylight):
+    """Packed measured reflectance: R=C02, G=C03, B=C01; A=valid daylight.
+
+    Display encoding clips [0,1] and quantizes to 1/255; source float arrays are
+    retained separately without clipping. No synthetic green lives in this asset.
+    """
+    ok = np.asarray(daylight, bool).copy()
+    for name in ('C01', 'C02', 'C03'):
+        ok &= np.isfinite(channels[name])
+    rgba = []
+    for name in ('C02', 'C03', 'C01'):
+        q = np.where(ok, np.clip(np.rint(channels[name] * 255), 0, 255), 0).astype(np.uint8)
+        rgba.append(_to_display(q, 0)[0])
+    valid, inside = _to_display(ok.astype(np.uint8), 0)
+    rgba.append(np.where(inside & (valid == 1), 255, 0).astype(np.uint8))
+    buf = io.BytesIO()
+    Image.fromarray(np.dstack(rgba), 'RGBA').save(buf, format='PNG', optimize=True)
+    return buf.getvalue()

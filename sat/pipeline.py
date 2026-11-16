@@ -58,6 +58,11 @@ def from_stamp(s):
     return datetime.strptime(s, '%Y%m%dT%H%MZ').replace(tzinfo=UTC)
 
 
+def accumulation_anchor(latest_slot):
+    """Last fully completed UTC hour, represented by its final HH:50 scan."""
+    return (latest_slot + timedelta(minutes=10)).replace(minute=0, second=0, microsecond=0) - timedelta(minutes=10)
+
+
 def make_tar_bundle(files: dict[str, bytes], mtime: int = 1700000000) -> tuple[bytes, str]:
     """Packs multiple raster bytes into a deterministic standard ustar archive."""
     buf = io.BytesIO()
@@ -72,6 +77,30 @@ def make_tar_bundle(files: dict[str, bytes], mtime: int = 1700000000) -> tuple[b
     tar_bytes = buf.getvalue()
     tar_hash = hashlib.sha256(tar_bytes).hexdigest()
     return tar_bytes, tar_hash
+
+
+def partition_tar_assets(files: dict[str, bytes], max_bytes=4 * 1024 * 1024):
+    """Deterministic bounded bundles; never raise the authenticated Worker limit.
+
+    A rare spatially complex rain scene may compress poorly. Splitting preserves
+    the exact raster values and the publisher's server-authoritative KV cap.
+    """
+    batches, batch, padded_bytes = [], {}, 0
+    for name in sorted(files):
+        data = files[name]
+        if len(data) > 700000:
+            raise ValueError(f'asset exceeds authenticated PNG limit: {name} ({len(data)} bytes)')
+        entry_size = 512 + ((len(data) + 511) // 512) * 512
+        # Python tarfile emits complete 10240-byte records and two zero headers.
+        total = ((padded_bytes + entry_size + 1024 + 10239) // 10240) * 10240
+        if batch and (total > max_bytes or len(batch) >= 45):
+            batches.append(batch)
+            batch, padded_bytes = {}, 0
+        batch[name] = data
+        padded_bytes += entry_size
+    if batch:
+        batches.append(batch)
+    return batches
 
 
 class Peak:
@@ -99,9 +128,11 @@ class Peak:
 # ------------------------------------------------------------------ state store
 class State:
     def __init__(self, root: Path):
-        self.root = root
-        for d in ('err', 'ir', 'glm', 'acc'):
-            (root / d).mkdir(parents=True, exist_ok=True)
+        # A changed extraction window must never reuse old NPZ arrays or hourly
+        # rasters. Preserve the older cache intact in its original directory.
+        self.root = root / G.GRID_ID
+        for d in ('err', 'ir', 'visible', 'glm', 'acc'):
+            (self.root / d).mkdir(parents=True, exist_ok=True)
 
     def err_slots(self):
         return {from_stamp(p.stem): p for p in (self.root / 'err').glob('*.npz')}
@@ -125,6 +156,18 @@ class State:
         z = np.load(path)
         return {'value': z['bt'], 'meta': json.loads(str(z['meta']))}
 
+    def visible_path(self, slot):
+        return self.root / 'visible' / f'{stamp(slot)}.npz'
+
+    def save_visible(self, slot, d):
+        # Retain calibrated source reflectances, including values >1.0. All colour
+        # enhancement and display quantization happen downstream on copies.
+        np.savez_compressed(self.visible_path(slot), **d['channels'], meta=json.dumps(d['meta']))
+
+    def load_visible(self, slot):
+        z = np.load(self.visible_path(slot))
+        return {'channels': {k: z[k] for k in ('C01', 'C02', 'C03')}, 'meta': json.loads(str(z['meta']))}
+
     def glm_done(self):
         out = {}
         for p in (self.root / 'glm').glob('*.json'):
@@ -144,7 +187,7 @@ class State:
 
     def prune(self, now):
         cut = now - timedelta(hours=26)
-        for d in ('err', 'ir'):
+        for d in ('err', 'ir', 'visible'):
             for p in (self.root / d).glob('*.npz'):
                 if from_stamp(p.stem) < cut:
                     p.unlink()
@@ -214,7 +257,7 @@ def main():
             d['meta'].update({'key': it['key'], 'object_last_modified': it['last_modified'], 'etag': it['etag'],
                               'bytes': d['bytes']})
             st.save_err(it['slot'], d)
-        frames = {s: st.load_err(p) for s, p in st.err_slots().items()}
+        frames = {s: st.load_err(p) for s, p in st.err_slots().items() if s + timedelta(minutes=10) <= now}
         latest_slot = max(frames) if frames else None
 
         # ---------------- ABI IR (C13) timeline + cloud products (latest common slot)
@@ -224,7 +267,7 @@ def main():
         res, errors['ir'] = pool_map(S.abi_read, ir_todo, workers=6)
         for it, d in res:
             st.save_ir(it['slot'], d)
-        ir = {s: st.load_ir(p) for s, p in st.ir_slots().items()}
+        ir = {s: st.load_ir(p) for s, p in st.ir_slots().items() if s + timedelta(minutes=10) <= now}
 
         prods = ['ABI-L2-ACMF', 'ABI-L2-ACHA2KMF', 'ABI-L2-ACHTF', 'ABI-L2-ACTPF', 'ABI-L2-COD2KMF']
         cats = {p: {it['slot']: it for it in S.abi_catalog(p, now, 1)} for p in prods}
@@ -236,6 +279,33 @@ def main():
             res, errors['cloud'] = pool_map(S.abi_read, [cats[p][cloud_slot] for p in prods if cloud_slot in cats[p]], 5)
             cloud = {it['product']: d for it, d in res}
 
+        # ---------------- ABI visible, NOAA co-registered 2-km MCMIP product.
+        # Download only the latest scene, and only while a part of this domain is
+        # above 5 degrees solar elevation. Never fabricate night-time reflectance.
+        visible = None
+        visible_daylight = None
+        visible_reason = 'Producto visible no disponible'
+        errors['visible'] = []
+        try:
+            vis_cat = S.abi_catalog('ABI-L2-MCMIPF', now, 1)
+            if vis_cat:
+                item = vis_cat[-1]
+                visible_daylight = A.solar_cosine(lat, lon, item['end']) > np.sin(np.radians(5))
+                scene_age = now - item['end']
+                if visible_daylight.any() and timedelta(0) <= scene_age <= timedelta(minutes=30):
+                    if st.visible_path(item['slot']).exists():
+                        visible = st.load_visible(item['slot'])
+                    else:
+                        visible = S.abi_visible_read(item)
+                        st.save_visible(item['slot'], visible)
+                elif not visible_daylight.any():
+                    visible_reason = 'Noche / crepúsculo: no se publica visible; usar infrarrojo calibrado'
+                else:
+                    visible_reason = 'Escena visible fuera de la ventana vigente de 30 minutos'
+        except Exception as e:
+            errors['visible'].append({'error': f'{type(e).__name__}: {e}'[:300]})
+            visible_reason = 'Proveedor visible no disponible: no se sustituye por textura sintética'
+
         # ---------------- GLM
         glm_cat = S.glm_catalog(now, int(np.ceil(args.glm_hours)) + 1)
         done = st.glm_done()
@@ -243,7 +313,7 @@ def main():
                   and it['start'] >= now - timedelta(hours=args.glm_hours)][:args.max_glm]
         res, errors['glm'] = pool_map(lambda it: S.glm_read(it, G.BBOX), g_todo, workers=12)
         st.save_glm([d for _, d in res])
-        glm_files = st.glm_done()
+        glm_files = {k: v for k, v in st.glm_done().items() if datetime.fromisoformat(v['end'].replace('Z', '+00:00')) <= now}
 
         st.prune(now)
 
@@ -273,19 +343,18 @@ def main():
             v = cur['raw'].astype(float) * 0.1
             return A.area_stats(v, cur['valid'], mask, (0.1, 1, 5, 10))
 
-        # accumulations: numeric values are calculated every 10 min for total scientific precision;
-        # raster PNG maps are anchored hourly to stay strictly within S/ 0 Cloudflare KV quotas.
+        # A single completed-hour window supplies maps, statistics and metadata.
+        # Previously a rolling window timestamp was attached to an older raster,
+        # causing up to 50 minutes of temporal mislabelling and complete-without-asset.
         accs = {}
-        hourly_slot = latest_slot.replace(minute=0, second=0, microsecond=0) if latest_slot else None
+        hourly_slot = accumulation_anchor(latest_slot) if latest_slot else None
         for hrs in A.WINDOWS_H:
-            acc, ok, info = A.accumulate(frames, latest_slot, hrs) if latest_slot else (None, None, {'complete': False, 'hours': hrs, 'reason': 'sin escaneos ERR'})
+            acc, ok, info = A.accumulate(frames, hourly_slot, hrs) if hourly_slot else (None, None, {'complete': False, 'hours': hrs, 'reason': 'sin escaneos ERR'})
             if acc is not None:
-                acc_slot = hourly_slot if (hourly_slot and hourly_slot in frames) else latest_slot
-                acc_r, ok_r, _ = A.accumulate(frames, acc_slot, hrs) if acc_slot != latest_slot else (acc, ok, info)
-                if acc_r is not None:
-                    name = f'acc{hrs}h_{stamp(acc_slot)}.png'
-                    assets[name] = E.acc_png(acc_r, ok_r)
-                    info['asset'] = name
+                name = f'acc{hrs}h_{stamp(hourly_slot)}.png'
+                assets[name] = E.acc_png(acc, ok)
+                info['asset'] = name
+                info['update_cadence'] = 'Última hora UTC completada; mismo intervalo para raster y estadísticas'
             accs[hrs] = (acc, ok, info)
 
         # GLM flashes and coverage
@@ -339,7 +408,7 @@ def main():
                     'cumulonimbus_probable': 'convección profunda probable + T cima ≤ 225 K + segunda evidencia independiente: rayo GLM a ≤ 10 km (±10 min) o enfriamiento ≤ −4 K en 10 min',
                     'estratos': 'cima < 2.5 km, fase líquida, textura IR homogénea (σ5x5 < 0.8 K)',
                     'cumulos': 'cima < 4 km, no hielo, textura IR heterogénea (σ5x5 ≥ 1.5 K); cúmulos pequeños son subpíxel',
-                    'nota': 'Clasificación conservadora por píxel de 2 km. No identifica especies nubosas ni confirma cumulonimbus. Sin corrección de paralaje (≈1–2 km para cimas de 10 km en esta zona).'},
+                    'nota': 'Clasificación conservadora por píxel de 2 km en nadir. No identifica especies ni confirma cumulonimbus. Sin corrección de paralaje: la posición aparente de nubes altas puede desplazarse varios km, según altura y ángulo de observación.'},
             }
             ir_frames = []
             for s in sorted(ir):
@@ -350,6 +419,20 @@ def main():
                 ir_frames.append({'asset': n, 'slot': S.iso(s), 'scan_start': ir[s]['meta']['time_coverage_start'],
                                   'scan_end': ir[s]['meta']['time_coverage_end']})
             cloud_info['ir_timeline'] = ir_frames
+            cloud_info['visible_status'] = visible_reason if visible is None else 'AVAILABLE'
+            if visible is not None:
+                name = f'visible_{stamp(datetime.fromisoformat(visible["meta"]["time_coverage_start"].replace("Z", "+00:00")))}.png'
+                assets[name] = E.visible_png(visible['channels'], visible_daylight)
+                cloud_info['assets']['visible_reflectance'] = name
+                cloud_info['visible'] = {
+                    'asset': name, 'scan_start': visible['meta']['time_coverage_start'],
+                    'scan_end': visible['meta']['time_coverage_end'], 'resolution_km': 2,
+                    'daylight_fraction': round(float(visible_daylight.mean()), 4),
+                    'method': 'ABI C01 azul, C02 rojo y C03 NIR; R=C02,G=C03,B=C01,A=DQF0 y sol>5°. Reflectancia display 1/255; verde sintético se deriva sólo en la vista natural.',
+                    'source_file': visible['meta']['file'], 'source_key': visible['meta']['key'],
+                    'source_etag': visible['meta']['etag'], 'source_units': '1',
+                    'display_encoding': 'RGBA8 reflectance (0..1); R=C02 G=C03 B=C01 A=daylight_quality_mask',
+                }
 
         # ---------------- regional & district indicators
         def zone_block(mask):
@@ -426,7 +509,7 @@ def main():
             'source': 'NOAA/NESDIS Enterprise Rain Rate (ERR), GOES-19 ABI, v1r1',
             'bucket': 's3://noaa-enterprise-rainrate-pds/G19/ABI-L2-FLDK-RainfallRate/',
             'nature': 'ESTIMACIÓN SATELITAL (infrarrojo ABI calibrado con microondas); no es pluviómetro ni radar',
-            'units': 'mm/h', 'native_resolution': '2 km en el nadir (~2,1 × 2,2 km en la Costa Norte)',
+            'units': 'mm/h', 'native_resolution': '2 km en el nadir; huella crece con el ángulo de observación (ver grid.native.pixel_area_km2)',
             'source_cadence_min': 10,
             'latest': timeline[-1] if timeline else None,
             'timeline': timeline,
@@ -436,10 +519,12 @@ def main():
             'frames_in_state': len(frames),
         }
         manifest['cloud'] = cloud_info
-        manifest['grid'] = {'display': {'bbox': G.BBOX, 'step_deg': G.DSTEP, 'nx': G.DNX, 'ny': G.DNY,
+        manifest['grid'] = {'id': G.GRID_ID, 'display': {'bbox': G.BBOX, 'step_deg': G.DSTEP, 'nx': G.DNX, 'ny': G.DNY,
                                         'origin': 'centro de celda = (west + (i+0.5)·step, north − (j+0.5)·step)',
                                         'resampling': 'vecino más cercano desde el píxel nativo; sin interpolación'},
-                            'native': {'rows': [G.R0, G.R1], 'cols': [G.C0, G.C1], 'projection': 'GOES-R ABI fixed grid, lon_0 = −75.0°'},
+                            'native': {'rows': [G.R0, G.R1], 'cols': [G.C0, G.C1], 'projection': 'GOES-R ABI fixed grid, lon_0 = −75.0°',
+                                       'pixel_area_km2': {'min': round(float(np.nanmin(cell_area)), 3), 'max': round(float(np.nanmax(cell_area)), 3)},
+                                       'cloud_top_reference': 'height above mean sea level (ABI ACHA retrieval); no terrain correction'},
                             'encoding': E.__doc__}
         manifest['freshness_rules_min'] = {'rate_current_max_age': 75, 'cloud_current_max_age': 75,
                                            'lightning_visual_max_age': 75, 'manifest_stale_after': 150}
@@ -485,11 +570,16 @@ def main():
     if scan_files:
         slot_dt = latest_slot or cloud_slot or now
         mtime_epoch = int(slot_dt.timestamp()) if isinstance(slot_dt, datetime) else 1700000000
-        scan_tar, scan_hash = make_tar_bundle(scan_files, mtime=mtime_epoch)
-        scan_bname = f"scan_{stamp(slot_dt)}_{scan_hash[:16]}.tar"
-        bundles[scan_bname] = {'sha256': scan_hash, 'bytes': len(scan_tar), 'files': list(scan_files.keys()), 'bytes_tar': scan_tar}
-        for fn in scan_files:
-            manifest['assets'][fn]['bundle'] = scan_bname
+        partitions = partition_tar_assets(scan_files)
+        for part_index, partition in enumerate(partitions):
+            scan_tar, scan_hash = make_tar_bundle(partition, mtime=mtime_epoch)
+            if len(scan_tar) > 4 * 1024 * 1024:
+                raise ValueError('scan bundle exceeds authenticated 4-MiB limit')
+            prefix = 'scan' if len(partitions) == 1 else f'scan{part_index+1}'
+            scan_bname = f"{prefix}_{stamp(slot_dt)}_{scan_hash[:16]}.tar"
+            bundles[scan_bname] = {'sha256': scan_hash, 'bytes': len(scan_tar), 'files': list(partition.keys()), 'bytes_tar': scan_tar}
+            for fn in partition:
+                manifest['assets'][fn]['bundle'] = scan_bname
 
     manifest['bundles'] = {bn: {'sha256': bd['sha256'], 'bytes': bd['bytes'], 'files': bd['files']} for bn, bd in bundles.items()}
     manifest['errors'] = {k: v[:20] for k, v in errors.items() if v}

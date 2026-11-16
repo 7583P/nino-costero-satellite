@@ -12,12 +12,15 @@ from pyproj import CRS, Transformer
 H = 35786023.0
 X0, Y0, STEP = -0.151844, 0.151844, 0.000056
 NFULL = 5424
-# Native window covering Tumbes, Piura and Lambayeque with margin.
-R0, R1, C0, C1 = 2877, 3129, 2347, 2531
+# Native window containing all 49 provinces in six departments (INEI boundaries,
+# bbox -81.328..-74.646 / -15.443..-3.382) with a conservative coastal margin.
+# Calculated using the same ellipsoidal GOES fixed-grid projection as the reader.
+R0, R1, C0, C1 = 2874, 3570, 2344, 2748
 NR, NC = R1 - R0, C1 - C0
-# Display raster (cell centres): lon [-81.60,-78.30), lat (-3.00,-7.60]
-LON_W, LAT_N, DSTEP, DNX, DNY = -81.60, -3.00, 0.01, 330, 460
+# Display spacing ~2.2 km: resampling never claims extra native ABI resolution.
+LON_W, LAT_N, DSTEP, DNX, DNY = -81.60, -3.00, 0.02, 360, 640
 BBOX = {'west': LON_W, 'east': round(LON_W + DNX * DSTEP, 4), 'north': LAT_N, 'south': round(LAT_N - DNY * DSTEP, 4)}
+GRID_ID = 'peru49-2km-v32'
 
 _CRS = CRS.from_proj4(f'+proj=geos +h={H} +lon_0=-75.0 +a=6378137 +b=6356752.31414 +sweep=x +units=m +no_defs')
 _FWD = Transformer.from_crs('EPSG:4326', _CRS, always_xy=True)
