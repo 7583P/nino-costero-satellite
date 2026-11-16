@@ -21,6 +21,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import psutil
 import eccodes as ec
+try:
+    from .build_province_forecast import GRID_UUID, build_forecast_bundle, load_grid_mapping, strict_hourly_statistics
+except ImportError:
+    from build_province_forecast import GRID_UUID, build_forecast_bundle, load_grid_mapping, strict_hourly_statistics
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -99,7 +103,8 @@ def discover_latest_run(cycle_preference=('12', '00')) -> tuple[str, str, list[i
         return max(candidates, key=lambda c: c[1])
     raise RuntimeError("No suitable complete ICON-EPS run found on DWD opendata")
 
-def download_and_extract_step(run: str, step: int, temp_dir: Path, session: requests.Session) -> tuple[dict[int, dict[str, float]], dict]:
+def download_and_extract_step(run: str, step: int, temp_dir: Path, session: requests.Session, targets: dict | None = None) -> tuple[dict[int, dict[str, float]], dict]:
+    targets = targets if targets is not None else CITIES
     cycle = run[8:10]
     filename = f"icon-eps_global_icosahedral_single-level_{run}_{step:03d}_tot_prec.grib2.bz2"
     url = f"https://opendata.dwd.de/weather/nwp/icon-eps/grib/{cycle}/tot_prec/{filename}"
@@ -162,6 +167,7 @@ def download_and_extract_step(run: str, step: int, temp_dir: Path, session: requ
                 units = ec.codes_get(gid, 'units')
                 num_points = ec.codes_get(gid, 'numberOfDataPoints')
                 grid_used = ec.codes_get(gid, 'numberOfGridUsed')
+                grid_uuid = ec.codes_get(gid, 'uuidOfHGrid')
                 
                 if msg_count == 0:
                     grib_meta = {
@@ -177,7 +183,8 @@ def download_and_extract_step(run: str, step: int, temp_dir: Path, session: requ
                         'endStep': end_step,
                         'numberOfForecastsInEnsemble': ec.codes_get(gid, 'numberOfForecastsInEnsemble'),
                         'numberOfDataPoints': num_points,
-                        'numberOfGridUsed': grid_used
+                        'numberOfGridUsed': grid_used,
+                        'uuidOfHGrid': grid_uuid
                     }
                 
                 # Check grid invariants
@@ -186,14 +193,22 @@ def download_and_extract_step(run: str, step: int, temp_dir: Path, session: requ
                 assert units == 'kg m**-2', f"Unexpected units: {units}"
                 assert step_type == 'accum', f"Unexpected stepType: {step_type}"
                 assert end_step == step, f"Step mismatch: {end_step} != {step}"
+                assert start_step == 0, f"Expected run accumulation starting at zero, got {start_step}"
+                assert grid_uuid == GRID_UUID, f"Unexpected grid UUID: {grid_uuid}"
+                assert ec.codes_get(gid, 'numberOfForecastsInEnsemble') == 40, 'Expected 40-member ensemble'
+                assert ec.codes_get(gid, 'dataDate') == int(run[:8]) and ec.codes_get(gid, 'dataTime') == int(run[8:])*100, 'Mixed model run'
+                assert mem in range(1,41) and mem not in members_data, f'Duplicate/invalid member {mem}'
                 
                 vals = ec.codes_get_values(gid)
-                members_data[mem] = {city_id: float(vals[c['cell_index']]) for city_id, c in CITIES.items()}
+                members_data[mem] = {city_id: float(vals[c['cell_index']]) for city_id, c in targets.items()}
                 msg_count += 1
             finally:
                 ec.codes_release(gid)
     
     read_elapsed = time.perf_counter() - t_read
+    assert msg_count == 40 and set(members_data) == set(range(1,41)), 'Incomplete member set; no probability produced'
+    with grib_path.open('rb') as original:
+        grib_sha256 = hashlib.file_digest(original, 'sha256').hexdigest()
     
     # Record evidence entry
     evidence = {
@@ -201,6 +216,7 @@ def download_and_extract_step(run: str, step: int, temp_dir: Path, session: requ
         'url': url,
         'download_bytes': bytes_downloaded,
         'sha256': bz2_sha256,
+        'grib_sha256': grib_sha256,
         'download_seconds': round(dl_elapsed, 4),
         'uncompressed_bytes': uncompressed_bytes,
         'decompress_seconds': round(dec_elapsed, 4),
@@ -223,7 +239,8 @@ def process_icon_hourly(
     num_steps: int = 24,
     threshold_mm: float = 0.1,
     out_dir: Path | None = None,
-    keep_temp: bool = False
+    keep_temp: bool = False,
+    province_mapping_path: Path | None = None
 ) -> dict:
     process = psutil.Process()
     cpu_start = process.cpu_times()
@@ -240,6 +257,11 @@ def process_icon_hourly(
         available_steps = list(range(1, num_steps + 1))
         
     run_dt = datetime.strptime(run, '%Y%m%d%H').replace(tzinfo=timezone.utc)
+    mapping_path = province_mapping_path or ROOT / 'scripts/data/icon_province_grid.json'
+    mapping = load_grid_mapping(mapping_path) if mapping_path.exists() else None
+    targets = dict(CITIES)
+    if mapping:
+        targets.update({p['target_key']:p for p in mapping['provinces']})
     
     temp_dir = ROOT / 'results/temp_icon_extraction' / run
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -254,10 +276,10 @@ def process_icon_hourly(
     
     # City hourly intervals accumulator
     # city -> list of interval records
-    city_intervals: dict[str, list[dict]] = {c: [] for c in CITIES}
+    city_intervals: dict[str, list[dict]] = {c: [] for c in targets}
     
     # Track previous step accumulation per member per city: member -> city -> float
-    prev_accumulations: dict[int, dict[str, float]] = {m: {c: 0.0 for c in CITIES} for m in range(1, 41)}
+    prev_accumulations: dict[int, dict[str, float]] = {m: {c: 0.0 for c in targets} for m in range(1, 41)}
     previous_step = 0
     
     for step in range(1, num_steps + 1):
@@ -265,7 +287,7 @@ def process_icon_hourly(
         step_end_utc = run_dt + timedelta(hours=step)
         
         try:
-            members_data, ev = download_and_extract_step(run, step, temp_dir, session)
+            members_data, ev = download_and_extract_step(run, step, temp_dir, session, targets)
             step_evidences.append(ev)
             total_download_bytes += ev['download_bytes']
             
@@ -275,31 +297,16 @@ def process_icon_hourly(
                 peak_rss = rss
                 
             # Process members and compute hourly precipitation
-            assert 38 <= len(members_data) <= 40, f"Expected 38-40 members, got {len(members_data)}"
-            valid_mems = len(members_data)
+            assert set(members_data) == set(range(1,41)), f"Expected all 40 unique members, got {len(members_data)}"
             if previous_step != step - 1:
                 prev_accumulations = members_data
                 previous_step = step
                 raise ValueError('Falta acumulado del paso anterior: no se interpreta una diferencia multihoraria como una hora')
             
-            for city_id, city_info in CITIES.items():
-                member_hourly_precip = []
-                exceeding_count = 0
-                
-                for mem in sorted(members_data.keys()):
-                    curr_acc = members_data[mem][city_id]
-                    prev_acc = prev_accumulations.get(mem, {}).get(city_id, 0.0)
-                    delta = curr_acc - prev_acc
-                    
-                    if delta < -1e-5:
-                        negative_truncations_detected += 1
-                        
-                    hourly_rain = max(0.0, delta)
-                    member_hourly_precip.append(hourly_rain)
-                    if hourly_rain >= threshold_mm:
-                        exceeding_count += 1
-                        
-                prob_percent = round((exceeding_count / float(valid_mems)) * 100.0, 1)
+            for city_id in targets:
+                statistics, reason = strict_hourly_statistics([prev_accumulations[m][city_id] for m in range(1,41)],[members_data[m][city_id] for m in range(1,41)],threshold_mm)
+                if reason == 'NEGATIVE_ACCUMULATION':
+                    negative_truncations_detected += 1
                 
                 interval_record = {
                     'step': step,
@@ -307,15 +314,16 @@ def process_icon_hourly(
                     'end_utc': step_end_utc.isoformat().replace('+00:00', 'Z'),
                     'start_pet': format_pet(step_start_utc),
                     'end_pet': format_pet(step_end_utc),
-                    'probability_percent': prob_percent,
+                    'probability_percent': statistics[0] if statistics else None,
                     'threshold_mm': threshold_mm,
-                    'valid_members': valid_mems,
-                    'exceeding_members': exceeding_count,
-                    'max_member_mm': round(max(member_hourly_precip), 4),
-                    'mean_ensemble_mm': round(sum(member_hourly_precip) / float(valid_mems), 4),
+                    'valid_members': 40 if statistics else 0,
+                    'exceeding_members': statistics[2] if statistics else 0,
+                    'max_member_mm': statistics[4] if statistics else None,
+                    'mean_ensemble_mm': statistics[3] if statistics else None,
                     'run_id': run,
                     'source': 'DWD ICON-EPS',
-                    'quality': 'VALID'
+                    'quality': 'VALID' if statistics else 'MISSING_STEP',
+                    **({'reason':reason} if reason else {})
                 }
                 city_intervals[city_id].append(interval_record)
                 
@@ -327,7 +335,7 @@ def process_icon_hourly(
         except Exception as e:
             print(f'DWD step {step}: unavailable ({type(e).__name__}: {e})', flush=True)
             # Handle missing / invalid step gracefully without inventing data
-            for city_id in CITIES:
+            for city_id in targets:
                 interval_record = {
                     'step': step,
                     'start_utc': step_start_utc.isoformat().replace('+00:00', 'Z'),
@@ -342,7 +350,8 @@ def process_icon_hourly(
                     'mean_ensemble_mm': None,
                     'run_id': run,
                     'source': 'DWD ICON-EPS',
-                    'quality': f'MISSING_STEP: {str(e)}'
+                    'quality': 'MISSING_STEP',
+                    'reason': str(e)
                 }
                 city_intervals[city_id].append(interval_record)
                 
@@ -399,7 +408,8 @@ def process_icon_hourly(
                 'complete_hours': sum(1 for iv in city_intervals[city_id] if iv['probability_percent'] is not None),
                 'valid_members_per_step': 40,
                 'negative_accumulations_detected': negative_truncations_detected > 0,
-                'negative_truncations_count': negative_truncations_detected
+                'negative_truncations_count': negative_truncations_detected,
+                'negative_delta_policy': 'Reject affected hour as unavailable; negative precipitation is never truncated to zero'
             },
             'generated_at': generated_at_utc,
             'intervals': city_intervals[city_id]
@@ -416,6 +426,14 @@ def process_icon_hourly(
             'nonnull_hours': doc['quality']['complete_hours']
         })
         
+    province_result = {'status':'UNAVAILABLE','reason':'Verified 49-province grid mapping not supplied'}
+    if mapping and num_steps == 24 and threshold_mm == .1:
+        province_bundle = build_forecast_bundle(run,city_intervals,mapping,generated_at_utc,source_files=[{k:ev[k] for k in ['step','url','sha256','grib_sha256','members_extracted','grib_meta']} for ev in step_evidences])
+        province_file = target_out_dir / 'provinces.json'
+        province_file.write_text(json.dumps(province_bundle,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
+        province_result = {'status':'AVAILABLE','path':str(province_file),'bytes':province_file.stat().st_size,'sha256':hashlib.sha256(province_file.read_bytes()).hexdigest(),'provinces':49,'complete_province_hours':sum(row[0] is not None for p in province_bundle['provinces'] for row in p['hourly'])}
+    elif mapping:
+        province_result = {'status':'UNAVAILABLE','reason':'Province contract requires exactly 24 hourly steps and fixed 0.1 mm threshold'}
     summary = {
         'run_id': run,
         'run_utc': run_dt.isoformat().replace('+00:00', 'Z'),
@@ -429,7 +447,8 @@ def process_icon_hourly(
         'peak_rss_mb': round(peak_rss / (1024 * 1024), 2),
         'negative_truncations_detected': negative_truncations_detected,
         'output_files': generated_files,
-        'step_evidences': step_evidences
+        'step_evidences': step_evidences,
+        'province_forecast': province_result
     }
     
     # Save extraction summary
@@ -460,6 +479,7 @@ def main():
     parser.add_argument('--threshold', type=float, default=0.1, help="Precipitation threshold in mm (default: 0.1)")
     parser.add_argument('--out-dir', type=str, default=None, help="Output directory")
     parser.add_argument('--keep-temp', action='store_true', help="Keep temporary decompressed GRIB files")
+    parser.add_argument('--province-mapping', type=Path, default=None, help='Verified 49-capital native-grid mapping (default: scripts/data/icon_province_grid.json when present)')
     args = parser.parse_args()
     
     out_dir = Path(args.out_dir) if args.out_dir else None
@@ -469,7 +489,8 @@ def main():
         num_steps=args.steps,
         threshold_mm=args.threshold,
         out_dir=out_dir,
-        keep_temp=args.keep_temp
+        keep_temp=args.keep_temp,
+        province_mapping_path=args.province_mapping
     )
     print(json.dumps({
         'run_id': res['run_id'],

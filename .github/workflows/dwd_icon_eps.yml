@@ -47,6 +47,7 @@ jobs:
           pip install requests urllib3 psutil eccodes
 
       - name: Execute DWD ICON-EPS 24-Hour Extraction
+        # The same GRIB pass samples the existing 3 references and 49 capitals.
         run: |
           RUN_ARG="${{ github.event.inputs.run_id || 'latest' }}"
           STEPS_ARG="${{ github.event.inputs.steps || '24' }}"
@@ -56,6 +57,7 @@ jobs:
       - name: Run Scientific Validation Tests
         run: |
           PYTHONPATH=.:scripts python tests/test_icon_eps.py
+          PYTHONPATH=.:scripts python -m unittest discover -s tests -p 'test_province_forecast.py' -v
 
       - name: Preserve scientific evidence
         if: always()

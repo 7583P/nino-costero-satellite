@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 import requests
 from common import ROOT, RESULTS, iso, write_json
+from build_province_forecast import validate_forecast_bundle
 
 CITIES = ('tumbes', 'piura', 'chiclayo')
 
@@ -87,6 +88,20 @@ def main():
         'upload_performed': False,
         'billable_resources_enabled': False
     }
+    province_body = None
+    province_path = hourly_dir / 'provinces.json'
+    record['province_forecast'] = {'status':'NOT_GENERATED','upload_performed':False}
+    if province_path.exists():
+        try:
+            provincial = json.loads(province_path.read_text(encoding='utf-8'))
+            validate_forecast_bundle(provincial)
+            if provincial['run']['run_id'] != run_id:raise ValueError('City and province model runs differ')
+            if not any(row[0] is not None for p in provincial['provinces'] for row in p['hourly']):raise ValueError('No valid provincial forecast hour')
+            province_body = json.dumps(provincial,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8')
+            if len(province_body)>400000:raise ValueError('Province bundle exceeds 400000-byte cap')
+            record['province_forecast']={'status':'VALIDATED','provinces':49,'body_bytes':len(province_body),'sha256':hashlib.sha256(province_body).hexdigest(),'upload_performed':False}
+        except Exception as error:
+            record['province_forecast']={'status':'INVALID','error':str(error),'upload_performed':False}
 
     if args.send:
         raw_url = os.getenv('WORKER_URL') or os.getenv('NINO_PUBLISH_URL') or ''
@@ -109,10 +124,22 @@ def main():
         write_json(output, record)
         if response.status_code not in (200, 304):
             raise RuntimeError(f"Hourly publication failed; status {response.status_code}; no retry or redirect performed")
+        # Existing three-city publication succeeds independently; the new bundle
+        # uses one additional KV key, no per-province writes and no extra GRIB downloads.
+        if province_body is not None:
+            province_target=urlsplit(target)._replace(path='/admin/province-forecast').geturl()
+            provincial_response=requests.put(province_target,data=province_body,headers={'Authorization':f'Bearer {token}','Content-Type':'application/json'},timeout=(10,30),allow_redirects=False)
+            try:result=provincial_response.json()
+            except ValueError:result={}
+            ok=provincial_response.status_code==200 and (result.get('published') is True or result.get('unchanged') is True)
+            record['province_forecast'].update(status='PUBLISHED' if ok else 'PUBLICATION_FAILED',upload_performed=True,http_status=provincial_response.status_code,kv_keys_written=result.get('kv_keys_written'))
+            write_json(output,record)
+            if not ok:raise RuntimeError('Provincial publication failed after legacy city publication; no retry or redirect performed')
     else:
         write_json(output, record)
 
     print(json.dumps(record, indent=2))
+    if record['province_forecast']['status']=='INVALID':raise ValueError('Provincial validation failed; three-city output/publication preserved')
 
 if __name__ == '__main__':
     main()
