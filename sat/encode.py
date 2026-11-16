@@ -1,4 +1,5 @@
-"""Lossless data PNGs on the 0.01 deg display grid (alpha always 255 => no premultiply loss).
+"""Data PNGs on the declared geographic grid (V3.2: 0.02 degrees).
+Scientific transport PNGs use alpha 255; visible uses alpha 0/255 as a validity mask.
 
 err  : R,G = rate uint16 in 0.1 mm/h ; B = 1 valid, 2 invalid quality, 0 outside window
 acc  : R,G,B low 6 bits = accumulation in 1/60 mm units (22 bits, exact rate sum)
@@ -6,6 +7,7 @@ acc  : R,G,B low 6 bits = accumulation in 1/60 mm units (22 bits, exact rate sum
 ir   : R = BT - 150 K (1 K steps, 1..255) ; B = 1 valid / 2 invalid / 0 outside
 cloud: R = class code, G = cloud-top height /100 m (255 none), B = CTT - 150 K (0 none)
 cloud2: R = COD (rounded, 255 none), G = phase (255 none), B = ACM (255 none)
+visible: R=C02, G=C03, B=C01 in 1/255 reflectance display units; A=255 only valid daylight
 """
 from __future__ import annotations
 
